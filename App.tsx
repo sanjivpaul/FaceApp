@@ -824,6 +824,20 @@ function AppContent() {
                 photo={true}
               />
 
+              {/* Face Guide Overlay - shows where to position face */}
+              {!annotatedImage && (
+                <View style={styles.faceGuideContainer}>
+                  <View style={styles.faceGuide}>
+                    {/* Oval face outline */}
+                    <View style={styles.faceGuideOval} />
+                    {/* Guide text */}
+                    <Text style={styles.faceGuideText}>
+                      Position your face here
+                    </Text>
+                  </View>
+                </View>
+              )}
+
               {/* Annotated Image Overlay (from WebSocket) */}
               {annotatedImage && (
                 <Image
@@ -1029,6 +1043,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#0D0D12',
+  },
+  faceGuideContainer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceGuide: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceGuideOval: {
+    width: 120,
+    height: 150,
+    borderWidth: 3,
+    borderColor: '#00FF88',
+    borderRadius: 100,
+    borderStyle: 'dashed',
+    shadowColor: '#00FF88',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  faceGuideText: {
+    color: '#00FF88',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 20,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 3,
   },
   placeholderText: {
     color: '#666666',
