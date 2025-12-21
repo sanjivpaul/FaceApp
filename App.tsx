@@ -265,6 +265,7 @@ function AppContent() {
   const sendCountRef = useRef(0); // Track sent frames
 
   const [isScanning, setIsScanning] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false); // Camera only active when needed
   const [status, setStatus] = useState<
     'idle' | 'scanning' | 'success' | 'error' | 'no_face'
   >('idle');
@@ -381,7 +382,7 @@ function AppContent() {
           }
         } else if (data.status === 'matched') {
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.log('✅ [WS] FACE MATCHED!');
+          console.log('✅ FACE MATCHED!');
           console.log('👤 User:', data.userId, '| Score:', data.score);
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
@@ -397,10 +398,12 @@ function AppContent() {
           setMatchedUser(data.userId?.toString() || 'User');
           setMatchScore(data.score);
 
-          // Reset UI after showing success
+          // Reset UI and deactivate camera after showing success
           setTimeout(() => {
             setIsScanning(false);
             setAnnotatedImage(null);
+            setIsCameraActive(false); // Turn off camera
+            console.log('📷 Camera deactivated');
             setTimeout(() => {
               setStatus('idle');
               setStatusMessage('Ready to scan');
@@ -409,7 +412,7 @@ function AppContent() {
             }, 2000);
           }, 2500);
         } else if (data.status === 'unmatched') {
-          console.log('❌ [WS] Face not recognized');
+          console.log('❌ Face not recognized');
           isSendingRef.current = false;
           if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
@@ -422,13 +425,14 @@ function AppContent() {
           setTimeout(() => {
             setIsScanning(false);
             setAnnotatedImage(null);
+            setIsCameraActive(false); // Turn off camera
             setTimeout(() => {
               setStatus('idle');
               setStatusMessage('Ready to scan');
             }, 2000);
           }, 2500);
         } else if (data.status === 'timeout') {
-          console.log('⏱️ [WS] Session timeout');
+          console.log('⏱️ Session timeout');
           isSendingRef.current = false;
           if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
@@ -441,6 +445,7 @@ function AppContent() {
           setTimeout(() => {
             setIsScanning(false);
             setAnnotatedImage(null);
+            setIsCameraActive(false); // Turn off camera
             setTimeout(() => {
               setStatus('idle');
               setStatusMessage('Ready to scan');
@@ -631,50 +636,58 @@ function AppContent() {
     console.log('⏹️ Frame streaming stopped');
   }, []);
 
-  // Start scanning - NOW INSTANT because WebSocket is pre-connected!
+  // Start scanning - Activate camera first, then stream
   const startScanning = useCallback(() => {
-    console.log('🚀 STARTING SCAN (WebSocket already connected!)');
+    console.log('🚀 STARTING SCAN');
 
     // Check if WebSocket is connected
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       console.log('⚠️ WebSocket not ready, reconnecting...');
       setStatusMessage('Connecting...');
       connectWebSocket();
-      // Wait a bit for connection then start
-      setTimeout(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          setIsScanning(true);
-          setStatus('scanning');
-          setStatusMessage('Scanning...');
-          startFrameStreaming();
-        } else {
-          setStatus('error');
-          setStatusMessage('Connection failed');
-        }
-      }, 1000);
-      return;
     }
 
-    // WebSocket is already connected - START IMMEDIATELY!
-    setIsScanning(true);
-    setStatus('scanning');
-    setStatusMessage('Scanning...');
+    // Reset state
     setAnnotatedImage(null);
     setMatchedUser(null);
     setMatchScore(null);
+    setStatus('scanning');
+    setStatusMessage('Opening camera...');
+    setIsScanning(true);
 
-    // Start streaming frames IMMEDIATELY (no delay!)
-    startFrameStreaming();
+    // STEP 1: Activate camera first
+    setIsCameraActive(true);
+    console.log('📷 Camera activated');
+
+    // STEP 2: Wait for camera to initialize, then start streaming
+    setTimeout(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        setStatusMessage('Scanning...');
+        startFrameStreaming();
+        console.log('▶️ Started frame streaming');
+      } else {
+        setStatus('error');
+        setStatusMessage('Connection failed');
+        setIsCameraActive(false);
+        setIsScanning(false);
+      }
+    }, 500); // Give camera 500ms to initialize
   }, [connectWebSocket, startFrameStreaming]);
 
   // Stop scanning (but keep WebSocket connected!)
   const stopScanning = useCallback(() => {
-    console.log('🛑 STOPPING SCAN (keeping connection)');
+    console.log('🛑 STOPPING SCAN');
 
-    setIsScanning(false);
+    // Stop streaming
     stopFrameStreaming();
-    // DON'T disconnect WebSocket - keep it alive for next scan!
+    setIsScanning(false);
     setAnnotatedImage(null);
+
+    // Deactivate camera
+    setTimeout(() => {
+      setIsCameraActive(false);
+      console.log('📷 Camera deactivated');
+    }, 300);
 
     // Reset status
     setTimeout(() => {
@@ -800,22 +813,42 @@ function AppContent() {
             { width: frameSize, height: frameSize },
           ]}
         >
-          {/* Live Camera Preview */}
-          <Camera
-            ref={cameraRef}
-            style={StyleSheet.absoluteFill}
-            device={device}
-            isActive={true}
-            photo={true}
-          />
+          {/* Show Camera only when active (saves battery!) */}
+          {isCameraActive ? (
+            <>
+              <Camera
+                ref={cameraRef}
+                style={StyleSheet.absoluteFill}
+                device={device}
+                isActive={true}
+                photo={true}
+              />
 
-          {/* Annotated Image Overlay (from WebSocket) */}
-          {annotatedImage && isScanning && (
-            <Image
-              source={{ uri: annotatedImage }}
-              style={styles.annotatedImage}
-              resizeMode="cover"
-            />
+              {/* Annotated Image Overlay (from WebSocket) */}
+              {annotatedImage && (
+                <Image
+                  source={{ uri: annotatedImage }}
+                  style={styles.annotatedImage}
+                  resizeMode="cover"
+                />
+              )}
+            </>
+          ) : (
+            /* Placeholder when camera is off */
+            <View style={styles.cameraPlaceholder}>
+              <View style={styles.faceSilhouette}>
+                <View style={styles.faceOval} />
+                <View style={styles.eyesContainer}>
+                  <View style={styles.eye} />
+                  <View style={styles.eye} />
+                </View>
+                <View style={styles.nose} />
+                <View style={styles.mouth} />
+              </View>
+              <Text style={styles.placeholderText}>
+                Tap button to start scanning
+              </Text>
+            </View>
           )}
 
           {/* Grid Overlay */}
@@ -990,6 +1023,64 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#1A1A1F',
     marginBottom: 20,
+  },
+  cameraPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0D0D12',
+  },
+  placeholderText: {
+    color: '#666666',
+    fontSize: 14,
+    marginTop: 30,
+    textAlign: 'center',
+  },
+  faceSilhouette: {
+    width: 120,
+    height: 160,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceOval: {
+    width: 100,
+    height: 140,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 255, 136, 0.3)',
+    borderRadius: 70,
+    position: 'absolute',
+  },
+  eyesContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: 50,
+    position: 'absolute',
+    top: 45,
+  },
+  eye: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 255, 136, 0.4)',
+  },
+  nose: {
+    width: 8,
+    height: 20,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 255, 136, 0.3)',
+    borderRadius: 4,
+    position: 'absolute',
+    top: 70,
+  },
+  mouth: {
+    width: 30,
+    height: 8,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 255, 136, 0.3)',
+    borderRadius: 10,
+    position: 'absolute',
+    top: 110,
   },
   annotatedImage: {
     position: 'absolute',
