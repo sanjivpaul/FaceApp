@@ -27,10 +27,13 @@ import {
   useCameraPermission,
 } from 'react-native-vision-camera';
 import RNFS from 'react-native-fs';
+import ImageResizer from '@bam.tech/react-native-image-resizer';
 
 const { width, height } = Dimensions.get('window');
 const WEBSOCKET_URL = 'ws://62.84.186.207/api/v1/ws/attendance';
-const FRAME_INTERVAL = 200; // Send frame every 200ms
+const FRAME_INTERVAL = 250; // Send frame every 250ms (optimized)
+const RECONNECT_INTERVAL = 3000; // Reconnect every 3 seconds if disconnected
+const IMAGE_QUALITY = 0.5; // JPEG quality 0-1 (lower = smaller file)
 
 // Face Frame Component with Grid Overlay
 const FaceFrameOverlay = ({
@@ -255,12 +258,17 @@ function AppContent() {
   const cameraRef = useRef<Camera>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const isSendingRef = useRef(false); // Flag to control frame sending
+  const sendCountRef = useRef(0); // Track sent frames
 
   const [isScanning, setIsScanning] = useState(false);
   const [status, setStatus] = useState<
     'idle' | 'scanning' | 'success' | 'error' | 'no_face'
   >('idle');
-  const [statusMessage, setStatusMessage] = useState('Ready to scan');
+  const [statusMessage, setStatusMessage] = useState('Connecting...');
   const [annotatedImage, setAnnotatedImage] = useState<string | null>(null);
   const [matchedUser, setMatchedUser] = useState<string | null>(null);
   const [matchScore, setMatchScore] = useState<number | null>(null);
@@ -341,66 +349,56 @@ function AppContent() {
     }
   }, [isScanning, scanLineAnim, pulseAnim, gridOpacity]);
 
-  // Connect WebSocket
+  // Connect WebSocket - Now pre-connects on app start!
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      console.log('🔌 [WS] Already connected, skipping...');
+    // Don't connect if already connected or connecting
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    ) {
       return;
     }
 
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔌 [WS] Connecting to:', WEBSOCKET_URL);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔌 [WS] Pre-connecting to:', WEBSOCKET_URL);
     const ws = new WebSocket(WEBSOCKET_URL);
 
     ws.onopen = () => {
-      console.log('✅ [WS] Connected successfully!');
-      console.log('📡 [WS] Ready to stream frames');
+      console.log('✅ [WS] Pre-connected! Ready for instant attendance.');
       setWsConnected(true);
-      setStatusMessage('Connected - Streaming...');
+      setStatusMessage('Ready to scan');
     };
 
-    let frameCount = 0;
     ws.onmessage = event => {
       try {
         const data = JSON.parse(event.data);
-        const timestamp = new Date().toLocaleTimeString();
 
         if (data.status === 'frame' && data.image) {
-          frameCount++;
-          // Log every 5th frame to avoid spam
-          if (frameCount % 5 === 0) {
-            console.log(
-              `📷 [WS] Frame #${frameCount} received at ${timestamp}`,
-            );
-          }
-          setAnnotatedImage('data:image/jpeg;base64,' + data.image);
-          if (status !== 'success') {
+          // Only update UI if we're actively scanning
+          if (isSendingRef.current) {
+            setAnnotatedImage('data:image/jpeg;base64,' + data.image);
             setStatus('scanning');
             setStatusMessage('Scanning face...');
           }
         } else if (data.status === 'matched') {
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
           console.log('✅ [WS] FACE MATCHED!');
-          console.log('👤 [WS] User ID:', data.userId);
-          console.log('📊 [WS] Score:', data.score);
-          console.log('💬 [WS] Message:', data.message);
-          console.log('⏰ [WS] Timestamp:', data.timestamp);
+          console.log('👤 User:', data.userId, '| Score:', data.score);
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-          setStatus('success');
-          setStatusMessage(data.message || 'Attendance Marked!');
-          setMatchedUser(data.userId || 'User');
-          setMatchScore(data.score);
-
+          // IMMEDIATELY stop sending frames
+          isSendingRef.current = false;
           if (frameIntervalRef.current) {
-            console.log('🛑 [WS] Stopping frame streaming...');
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
           }
 
+          setStatus('success');
+          setStatusMessage(data.message || 'Attendance Marked!');
+          setMatchedUser(data.userId?.toString() || 'User');
+          setMatchScore(data.score);
+
+          // Reset UI after showing success
           setTimeout(() => {
-            console.log('🔄 [UI] Resetting UI after match...');
             setIsScanning(false);
             setAnnotatedImage(null);
             setTimeout(() => {
@@ -408,102 +406,73 @@ function AppContent() {
               setStatusMessage('Ready to scan');
               setMatchedUser(null);
               setMatchScore(null);
-              console.log('✨ [UI] Ready for next scan');
             }, 2000);
-          }, 3000);
+          }, 2500);
         } else if (data.status === 'unmatched') {
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.log('❌ [WS] FACE NOT MATCHED');
-          console.log('💬 [WS] Message:', data.message);
-          console.log('⏰ [WS] Timestamp:', data.timestamp);
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('❌ [WS] Face not recognized');
+          isSendingRef.current = false;
+          if (frameIntervalRef.current) {
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
 
           setStatus('error');
           setStatusMessage(data.message || 'Face not recognized');
-          setMatchedUser(null);
-          setMatchScore(null);
-
-          if (frameIntervalRef.current) {
-            console.log('🛑 [WS] Stopping frame streaming...');
-            clearInterval(frameIntervalRef.current);
-            frameIntervalRef.current = null;
-          }
 
           setTimeout(() => {
-            console.log('🔄 [UI] Resetting UI after unmatched...');
             setIsScanning(false);
             setAnnotatedImage(null);
             setTimeout(() => {
               setStatus('idle');
               setStatusMessage('Ready to scan');
-              console.log('✨ [UI] Ready for next scan');
             }, 2000);
-          }, 3000);
+          }, 2500);
         } else if (data.status === 'timeout') {
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.log('⏱️ [WS] SESSION TIMEOUT');
-          console.log('💬 [WS] Message:', data.message);
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('⏱️ [WS] Session timeout');
+          isSendingRef.current = false;
+          if (frameIntervalRef.current) {
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
 
           setStatus('error');
-          setStatusMessage(data.message || 'Session timed out');
-
-          if (frameIntervalRef.current) {
-            console.log('🛑 [WS] Stopping frame streaming...');
-            clearInterval(frameIntervalRef.current);
-            frameIntervalRef.current = null;
-          }
+          setStatusMessage('No face detected');
 
           setTimeout(() => {
-            console.log('🔄 [UI] Resetting UI after timeout...');
             setIsScanning(false);
             setAnnotatedImage(null);
             setTimeout(() => {
               setStatus('idle');
               setStatusMessage('Ready to scan');
-              console.log('✨ [UI] Ready for next scan');
-            }, 2000);
+            }, 1500);
           }, 2000);
         } else if (data.status === 'no_face') {
-          console.log('👤 [WS] No face detected in frame');
-          setStatus('no_face');
-          setStatusMessage('Position your face in frame');
+          if (isSendingRef.current) {
+            setStatus('no_face');
+            setStatusMessage('Position your face');
+          }
         } else if (data.status === 'error') {
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.log('⚠️ [WS] SERVER ERROR');
-          console.log('💬 [WS] Message:', data.message);
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('⚠️ [WS] Server error:', data.message);
           setStatus('error');
           setStatusMessage(data.message || 'Server error');
-        } else {
-          console.log('❓ [WS] Unknown status received:', data.status);
-          console.log('📦 [WS] Full data:', JSON.stringify(data));
         }
       } catch (error) {
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🚨 [WS] Error parsing message!');
-        console.log('📦 [WS] Raw event data:', event.data?.substring(0, 200));
-        console.log('❌ [WS] Error:', error);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🚨 [WS] Parse error:', error);
       }
     };
 
-    ws.onerror = error => {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🚨 [WS] CONNECTION ERROR!');
-      console.log('❌ [WS] Error details:', error);
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    ws.onerror = () => {
+      console.log('🚨 [WS] Connection error - will retry...');
       setWsConnected(false);
-      setStatus('error');
-      setStatusMessage('Connection error');
+      setStatusMessage('Reconnecting...');
     };
 
-    ws.onclose = event => {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔌 [WS] Connection closed');
-      console.log('📊 [WS] Total frames received:', frameCount);
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    ws.onclose = () => {
+      console.log('🔌 [WS] Connection closed - will reconnect');
       setWsConnected(false);
+      wsRef.current = null;
+      // Stop any ongoing streaming
+      isSendingRef.current = false;
       if (frameIntervalRef.current) {
         clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = null;
@@ -511,11 +480,48 @@ function AppContent() {
     };
 
     wsRef.current = ws;
-  }, [status]);
+  }, []);
 
-  // Disconnect WebSocket
+  // Auto-connect WebSocket on app start and auto-reconnect
+  useEffect(() => {
+    console.log('🚀 [APP] Starting - Pre-connecting WebSocket...');
+    connectWebSocket();
+
+    // Setup auto-reconnect
+    reconnectIntervalRef.current = setInterval(() => {
+      if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+        console.log('🔄 [WS] Auto-reconnecting...');
+        connectWebSocket();
+      }
+    }, RECONNECT_INTERVAL);
+
+    return () => {
+      if (reconnectIntervalRef.current) {
+        clearInterval(reconnectIntervalRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [connectWebSocket]);
+
+  // Stop sending but keep connection
+  const stopSending = useCallback(() => {
+    isSendingRef.current = false;
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+    console.log('⏹️ Stopped frame sending');
+  }, []);
+
+  // Disconnect WebSocket (only for cleanup)
   const disconnectWebSocket = useCallback(() => {
-    console.log('🔌 [WS] Disconnecting WebSocket...');
+    isSendingRef.current = false;
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -527,23 +533,17 @@ function AppContent() {
   }, []);
 
   // Capture and send frame
-  let sendCount = 0;
   const captureAndSendFrame = useCallback(async () => {
-    if (!cameraRef.current) {
-      console.log('⚠️ [CAMERA] Camera ref not available');
+    // Check if we should be sending
+    if (!isSendingRef.current) {
       return;
     }
 
-    if (!wsRef.current) {
-      console.log('⚠️ [WS] WebSocket ref not available');
+    if (!cameraRef.current || !wsRef.current) {
       return;
     }
 
     if (wsRef.current.readyState !== WebSocket.OPEN) {
-      console.log(
-        '⚠️ [WS] WebSocket not open, state:',
-        wsRef.current.readyState,
-      );
       return;
     }
 
@@ -553,126 +553,146 @@ function AppContent() {
         enableShutterSound: false,
       });
 
-      sendCount++;
-      if (sendCount % 5 === 0) {
-        console.log(`📸 [CAMERA] Captured photo #${sendCount}:`, photo.path);
+      // Check again if we should still send (might have matched during capture)
+      if (!isSendingRef.current) {
+        try {
+          await RNFS.unlink(photo.path);
+        } catch {}
+        return;
       }
 
-      // Read the file as base64 using react-native-fs (fetch doesn't work with file:// on Android)
-      const base64Image = await RNFS.readFile(photo.path, 'base64');
+      sendCountRef.current++;
+      const count = sendCountRef.current;
+
+      // COMPRESS IMAGE: Resize to 640x480 and compress to 50% quality
+      // This reduces 3MB images to ~50-100KB!
+      const resized = await ImageResizer.createResizedImage(
+        photo.path,
+        640, // width
+        480, // height
+        'JPEG',
+        50, // quality (0-100)
+        0, // rotation
+        undefined, // outputPath (undefined = temp)
+        false, // keepMeta
+      );
+
+      // Read compressed image as base64
+      const base64Image = await RNFS.readFile(resized.path, 'base64');
       const base64data = `data:image/jpeg;base64,${base64Image}`;
 
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        if (sendCount % 5 === 0) {
+      // Final check before sending
+      if (
+        isSendingRef.current &&
+        wsRef.current?.readyState === WebSocket.OPEN
+      ) {
+        if (count % 3 === 0) {
           console.log(
-            `📤 [WS] Sending frame #${sendCount}, size: ${(
-              base64data.length / 1024
-            ).toFixed(1)}KB`,
+            `📤 Frame #${count} | ${(base64data.length / 1024).toFixed(0)}KB`,
           );
         }
         wsRef.current.send(base64data);
-      } else {
-        console.log('⚠️ [WS] Cannot send - connection not open');
       }
 
-      // Clean up the temp file to save memory
+      // Clean up temp files
       try {
         await RNFS.unlink(photo.path);
-      } catch {
-        // Ignore cleanup errors
-      }
-    } catch (error) {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🚨 [CAMERA] Error capturing frame!');
-      console.log('❌ [CAMERA] Error:', error);
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        await RNFS.unlink(resized.path);
+      } catch {}
+    } catch (error: any) {
+      // Silently skip errors (camera busy, etc.)
     }
   }, []);
 
   // Start frame streaming
   const startFrameStreaming = useCallback(() => {
-    console.log('▶️ [STREAM] Starting frame streaming...');
-    console.log('⏱️ [STREAM] Interval:', FRAME_INTERVAL, 'ms');
-
     if (frameIntervalRef.current) {
-      console.log('🔄 [STREAM] Clearing existing interval');
       clearInterval(frameIntervalRef.current);
     }
+
+    // Enable sending
+    isSendingRef.current = true;
+    sendCountRef.current = 0;
+
+    console.log('▶️ Starting frame stream (interval:', FRAME_INTERVAL, 'ms)');
 
     frameIntervalRef.current = setInterval(() => {
       captureAndSendFrame();
     }, FRAME_INTERVAL);
-
-    console.log('✅ [STREAM] Frame streaming started');
   }, [captureAndSendFrame]);
 
   // Stop frame streaming
   const stopFrameStreaming = useCallback(() => {
-    console.log('⏹️ [STREAM] Stopping frame streaming...');
+    isSendingRef.current = false;
     if (frameIntervalRef.current) {
       clearInterval(frameIntervalRef.current);
       frameIntervalRef.current = null;
-      console.log('✅ [STREAM] Frame streaming stopped');
-    } else {
-      console.log('ℹ️ [STREAM] No active streaming to stop');
     }
+    console.log('⏹️ Frame streaming stopped');
   }, []);
 
-  // Start scanning
+  // Start scanning - NOW INSTANT because WebSocket is pre-connected!
   const startScanning = useCallback(() => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 [APP] STARTING FACE SCAN');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚀 STARTING SCAN (WebSocket already connected!)');
 
+    // Check if WebSocket is connected
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log('⚠️ WebSocket not ready, reconnecting...');
+      setStatusMessage('Connecting...');
+      connectWebSocket();
+      // Wait a bit for connection then start
+      setTimeout(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          setIsScanning(true);
+          setStatus('scanning');
+          setStatusMessage('Scanning...');
+          startFrameStreaming();
+        } else {
+          setStatus('error');
+          setStatusMessage('Connection failed');
+        }
+      }, 1000);
+      return;
+    }
+
+    // WebSocket is already connected - START IMMEDIATELY!
     setIsScanning(true);
     setStatus('scanning');
-    setStatusMessage('Connecting...');
+    setStatusMessage('Scanning...');
     setAnnotatedImage(null);
     setMatchedUser(null);
     setMatchScore(null);
 
-    console.log('🔌 [APP] Initiating WebSocket connection...');
-    connectWebSocket();
-
-    // Start streaming frames after a short delay
-    console.log('⏳ [APP] Waiting 500ms before starting frame stream...');
-    setTimeout(() => {
-      console.log('📹 [APP] Starting frame capture & stream...');
-      startFrameStreaming();
-    }, 500);
+    // Start streaming frames IMMEDIATELY (no delay!)
+    startFrameStreaming();
   }, [connectWebSocket, startFrameStreaming]);
 
-  // Stop scanning
+  // Stop scanning (but keep WebSocket connected!)
   const stopScanning = useCallback(() => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🛑 [APP] STOPPING FACE SCAN');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🛑 STOPPING SCAN (keeping connection)');
 
     setIsScanning(false);
     stopFrameStreaming();
-    disconnectWebSocket();
+    // DON'T disconnect WebSocket - keep it alive for next scan!
     setAnnotatedImage(null);
 
-    // Reset status after a delay
+    // Reset status
     setTimeout(() => {
       setStatus('idle');
       setStatusMessage('Ready to scan');
       setMatchedUser(null);
       setMatchScore(null);
-      console.log('✨ [APP] Scan stopped, ready for next');
-    }, 500);
-  }, [stopFrameStreaming, disconnectWebSocket]);
+      console.log('✨ Ready for next scan');
+    }, 300);
+  }, [stopFrameStreaming]);
 
   // Handle mark attendance button
   const handleMarkAttendance = () => {
-    console.log('👆 [BUTTON] Mark Attendance pressed');
-    console.log('📊 [BUTTON] Current state - isScanning:', isScanning);
-
     if (isScanning) {
-      console.log('🔄 [BUTTON] Action: Stopping scan');
+      console.log('👆 Stopping scan...');
       stopScanning();
     } else {
-      console.log('🔄 [BUTTON] Action: Starting scan');
+      console.log('👆 Starting scan...');
       startScanning();
     }
   };

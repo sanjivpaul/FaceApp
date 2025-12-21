@@ -30,6 +30,8 @@ npm run android
 
 npx react-native run-android
 
+npx react-native log-android
+
 # OR using Yarn
 yarn android
 ```
