@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext (ws://) traffic to your WebSocket server -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">62.84.186.207</domain>
+    </domain-config>
+</network-security-config>
+
