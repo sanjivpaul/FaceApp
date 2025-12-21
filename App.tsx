@@ -577,7 +577,7 @@ function AppContent() {
         480, // height
         'JPEG',
         50, // quality (0-100)
-        0, // rotation
+        270, // rotation
         undefined, // outputPath (undefined = temp)
         false, // keepMeta
       );
