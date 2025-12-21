@@ -1,9 +1,9 @@
 /**
  * Face Recognition Attendance System
- * Professional UI for face detection and attendance marking
+ * Professional UI with WebSocket streaming for face detection
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StatusBar,
   StyleSheet,
@@ -13,76 +13,38 @@ import {
   Animated,
   Dimensions,
   Easing,
+  Image,
+  Alert,
+  Platform,
 } from 'react-native';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+} from 'react-native-vision-camera';
+import RNFS from 'react-native-fs';
 
 const { width, height } = Dimensions.get('window');
+const WEBSOCKET_URL = 'ws://62.84.186.207/api/v1/ws/attendance';
+const FRAME_INTERVAL = 200; // Send frame every 200ms
 
-// Face Frame Component with Grid
-const FaceFrame = ({ isScanning }: { isScanning: boolean }) => {
-  const scanLineAnim = useRef(new Animated.Value(0)).current;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const gridOpacity = useRef(new Animated.Value(0.3)).current;
-
-  useEffect(() => {
-    if (isScanning) {
-      // Scanning line animation
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scanLineAnim, {
-            toValue: 1,
-            duration: 2000,
-            easing: Easing.linear,
-            useNativeDriver: true,
-          }),
-          Animated.timing(scanLineAnim, {
-            toValue: 0,
-            duration: 0,
-            useNativeDriver: true,
-          }),
-        ]),
-      ).start();
-
-      // Pulse animation for corners
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.1,
-            duration: 800,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 800,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ]),
-      ).start();
-
-      // Grid glow animation
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(gridOpacity, {
-            toValue: 0.8,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(gridOpacity, {
-            toValue: 0.3,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ]),
-      ).start();
-    }
-  }, [isScanning, scanLineAnim, pulseAnim, gridOpacity]);
-
-  const frameSize = width * 0.75;
+// Face Frame Component with Grid Overlay
+const FaceFrameOverlay = ({
+  isScanning,
+  pulseAnim,
+  gridOpacity,
+  scanLineAnim,
+}: {
+  isScanning: boolean;
+  pulseAnim: Animated.Value;
+  gridOpacity: Animated.Value;
+  scanLineAnim: Animated.Value;
+}) => {
+  const frameSize = width * 0.85;
   const gridLines = 8;
 
   const scanLineTranslate = scanLineAnim.interpolate({
@@ -91,7 +53,10 @@ const FaceFrame = ({ isScanning }: { isScanning: boolean }) => {
   });
 
   return (
-    <View style={[styles.faceFrame, { width: frameSize, height: frameSize }]}>
+    <View
+      style={[styles.faceFrameOverlay, { width: frameSize, height: frameSize }]}
+      pointerEvents="none"
+    >
       {/* Grid Lines */}
       <Animated.View style={[styles.gridContainer, { opacity: gridOpacity }]}>
         {/* Vertical lines */}
@@ -171,17 +136,6 @@ const FaceFrame = ({ isScanning }: { isScanning: boolean }) => {
           ]}
         />
       )}
-
-      {/* Face Silhouette */}
-      <View style={styles.faceSilhouette}>
-        <View style={styles.faceOval} />
-        <View style={styles.eyesContainer}>
-          <View style={styles.eye} />
-          <View style={styles.eye} />
-        </View>
-        <View style={styles.nose} />
-        <View style={styles.mouth} />
-      </View>
     </View>
   );
 };
@@ -190,9 +144,13 @@ const FaceFrame = ({ isScanning }: { isScanning: boolean }) => {
 const StatusIndicator = ({
   status,
   message,
+  userName,
+  score,
 }: {
-  status: 'idle' | 'scanning' | 'success' | 'error';
+  status: 'idle' | 'scanning' | 'success' | 'error' | 'no_face';
   message: string;
+  userName?: string;
+  score?: number;
 }) => {
   const dotAnim = useRef(new Animated.Value(0)).current;
 
@@ -212,6 +170,8 @@ const StatusIndicator = ({
           }),
         ]),
       ).start();
+    } else {
+      dotAnim.setValue(1);
     }
   }, [status, dotAnim]);
 
@@ -222,7 +182,8 @@ const StatusIndicator = ({
       case 'success':
         return '#00FF88';
       case 'error':
-        return '#FF4444';
+      case 'no_face':
+        return '#FF6B6B';
       default:
         return '#666666';
     }
@@ -239,9 +200,41 @@ const StatusIndicator = ({
           },
         ]}
       />
-      <Text style={[styles.statusText, { color: getStatusColor() }]}>
-        {message}
+      <View style={styles.statusTextContainer}>
+        <Text style={[styles.statusText, { color: getStatusColor() }]}>
+          {message}
+        </Text>
+        {userName && (
+          <Text style={styles.userNameText}>
+            Welcome, {userName} {score ? `(${(score * 100).toFixed(1)}%)` : ''}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+};
+
+// Camera Permission Screen
+const PermissionScreen = ({
+  onRequestPermission,
+}: {
+  onRequestPermission: () => void;
+}) => {
+  return (
+    <View style={styles.permissionContainer}>
+      <View style={styles.permissionIcon}>
+        <Text style={styles.permissionIconText}>📷</Text>
+      </View>
+      <Text style={styles.permissionTitle}>Camera Access Required</Text>
+      <Text style={styles.permissionSubtitle}>
+        We need camera access to scan your face for attendance verification
       </Text>
+      <TouchableOpacity
+        style={styles.permissionButton}
+        onPress={onRequestPermission}
+      >
+        <Text style={styles.permissionButtonText}>Grant Permission</Text>
+      </TouchableOpacity>
     </View>
   );
 };
@@ -257,14 +250,29 @@ function App() {
 
 function AppContent() {
   const insets = useSafeAreaInsets();
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice('front');
+  const cameraRef = useRef<Camera>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const [isScanning, setIsScanning] = useState(false);
   const [status, setStatus] = useState<
-    'idle' | 'scanning' | 'success' | 'error'
+    'idle' | 'scanning' | 'success' | 'error' | 'no_face'
   >('idle');
   const [statusMessage, setStatusMessage] = useState('Ready to scan');
+  const [annotatedImage, setAnnotatedImage] = useState<string | null>(null);
+  const [matchedUser, setMatchedUser] = useState<string | null>(null);
+  const [matchScore, setMatchScore] = useState<number | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const buttonScale = useRef(new Animated.Value(1)).current;
+  const scanLineAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const gridOpacity = useRef(new Animated.Value(0.3)).current;
 
+  // Initialize fade animation
   useEffect(() => {
     Animated.timing(fadeAnim, {
       toValue: 1,
@@ -273,40 +281,400 @@ function AppContent() {
     }).start();
   }, [fadeAnim]);
 
-  const handleMarkAttendance = () => {
+  // Scanning animations
+  useEffect(() => {
     if (isScanning) {
-      // Cancel scanning
-      setIsScanning(false);
-      setStatus('idle');
-      setStatusMessage('Ready to scan');
+      // Scanning line animation
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(scanLineAnim, {
+            toValue: 1,
+            duration: 2000,
+            easing: Easing.linear,
+            useNativeDriver: true,
+          }),
+          Animated.timing(scanLineAnim, {
+            toValue: 0,
+            duration: 0,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+
+      // Pulse animation for corners
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1.05,
+            duration: 800,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 800,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+
+      // Grid glow animation
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(gridOpacity, {
+            toValue: 0.6,
+            duration: 1000,
+            useNativeDriver: true,
+          }),
+          Animated.timing(gridOpacity, {
+            toValue: 0.2,
+            duration: 1000,
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    } else {
+      scanLineAnim.setValue(0);
+      pulseAnim.setValue(1);
+      gridOpacity.setValue(0.3);
+    }
+  }, [isScanning, scanLineAnim, pulseAnim, gridOpacity]);
+
+  // Connect WebSocket
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('🔌 [WS] Already connected, skipping...');
       return;
     }
 
-    // Start scanning
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔌 [WS] Connecting to:', WEBSOCKET_URL);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    const ws = new WebSocket(WEBSOCKET_URL);
+
+    ws.onopen = () => {
+      console.log('✅ [WS] Connected successfully!');
+      console.log('📡 [WS] Ready to stream frames');
+      setWsConnected(true);
+      setStatusMessage('Connected - Streaming...');
+    };
+
+    let frameCount = 0;
+    ws.onmessage = event => {
+      try {
+        const data = JSON.parse(event.data);
+        const timestamp = new Date().toLocaleTimeString();
+
+        if (data.status === 'frame' && data.image) {
+          frameCount++;
+          // Log every 5th frame to avoid spam
+          if (frameCount % 5 === 0) {
+            console.log(
+              `📷 [WS] Frame #${frameCount} received at ${timestamp}`,
+            );
+          }
+          setAnnotatedImage('data:image/jpeg;base64,' + data.image);
+          if (status !== 'success') {
+            setStatus('scanning');
+            setStatusMessage('Scanning face...');
+          }
+        } else if (data.status === 'matched') {
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('✅ [WS] FACE MATCHED!');
+          console.log('👤 [WS] User ID:', data.userId);
+          console.log('📊 [WS] Score:', data.score);
+          console.log('💬 [WS] Message:', data.message);
+          console.log('⏰ [WS] Timestamp:', data.timestamp);
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+          setStatus('success');
+          setStatusMessage(data.message || 'Attendance Marked!');
+          setMatchedUser(data.userId || 'User');
+          setMatchScore(data.score);
+
+          if (frameIntervalRef.current) {
+            console.log('🛑 [WS] Stopping frame streaming...');
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
+
+          setTimeout(() => {
+            console.log('🔄 [UI] Resetting UI after match...');
+            setIsScanning(false);
+            setAnnotatedImage(null);
+            setTimeout(() => {
+              setStatus('idle');
+              setStatusMessage('Ready to scan');
+              setMatchedUser(null);
+              setMatchScore(null);
+              console.log('✨ [UI] Ready for next scan');
+            }, 2000);
+          }, 3000);
+        } else if (data.status === 'unmatched') {
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('❌ [WS] FACE NOT MATCHED');
+          console.log('💬 [WS] Message:', data.message);
+          console.log('⏰ [WS] Timestamp:', data.timestamp);
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+          setStatus('error');
+          setStatusMessage(data.message || 'Face not recognized');
+          setMatchedUser(null);
+          setMatchScore(null);
+
+          if (frameIntervalRef.current) {
+            console.log('🛑 [WS] Stopping frame streaming...');
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
+
+          setTimeout(() => {
+            console.log('🔄 [UI] Resetting UI after unmatched...');
+            setIsScanning(false);
+            setAnnotatedImage(null);
+            setTimeout(() => {
+              setStatus('idle');
+              setStatusMessage('Ready to scan');
+              console.log('✨ [UI] Ready for next scan');
+            }, 2000);
+          }, 3000);
+        } else if (data.status === 'timeout') {
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('⏱️ [WS] SESSION TIMEOUT');
+          console.log('💬 [WS] Message:', data.message);
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+          setStatus('error');
+          setStatusMessage(data.message || 'Session timed out');
+
+          if (frameIntervalRef.current) {
+            console.log('🛑 [WS] Stopping frame streaming...');
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
+
+          setTimeout(() => {
+            console.log('🔄 [UI] Resetting UI after timeout...');
+            setIsScanning(false);
+            setAnnotatedImage(null);
+            setTimeout(() => {
+              setStatus('idle');
+              setStatusMessage('Ready to scan');
+              console.log('✨ [UI] Ready for next scan');
+            }, 2000);
+          }, 2000);
+        } else if (data.status === 'no_face') {
+          console.log('👤 [WS] No face detected in frame');
+          setStatus('no_face');
+          setStatusMessage('Position your face in frame');
+        } else if (data.status === 'error') {
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('⚠️ [WS] SERVER ERROR');
+          console.log('💬 [WS] Message:', data.message);
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          setStatus('error');
+          setStatusMessage(data.message || 'Server error');
+        } else {
+          console.log('❓ [WS] Unknown status received:', data.status);
+          console.log('📦 [WS] Full data:', JSON.stringify(data));
+        }
+      } catch (error) {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🚨 [WS] Error parsing message!');
+        console.log('📦 [WS] Raw event data:', event.data?.substring(0, 200));
+        console.log('❌ [WS] Error:', error);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      }
+    };
+
+    ws.onerror = error => {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🚨 [WS] CONNECTION ERROR!');
+      console.log('❌ [WS] Error details:', error);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      setWsConnected(false);
+      setStatus('error');
+      setStatusMessage('Connection error');
+    };
+
+    ws.onclose = event => {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🔌 [WS] Connection closed');
+      console.log('📊 [WS] Total frames received:', frameCount);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      setWsConnected(false);
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = null;
+      }
+    };
+
+    wsRef.current = ws;
+  }, [status]);
+
+  // Disconnect WebSocket
+  const disconnectWebSocket = useCallback(() => {
+    console.log('🔌 [WS] Disconnecting WebSocket...');
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+      console.log('✅ [WS] WebSocket disconnected');
+    } else {
+      console.log('ℹ️ [WS] No active connection to disconnect');
+    }
+    setWsConnected(false);
+  }, []);
+
+  // Capture and send frame
+  let sendCount = 0;
+  const captureAndSendFrame = useCallback(async () => {
+    if (!cameraRef.current) {
+      console.log('⚠️ [CAMERA] Camera ref not available');
+      return;
+    }
+
+    if (!wsRef.current) {
+      console.log('⚠️ [WS] WebSocket ref not available');
+      return;
+    }
+
+    if (wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log(
+        '⚠️ [WS] WebSocket not open, state:',
+        wsRef.current.readyState,
+      );
+      return;
+    }
+
+    try {
+      const photo = await cameraRef.current.takePhoto({
+        flash: 'off',
+        enableShutterSound: false,
+      });
+
+      sendCount++;
+      if (sendCount % 5 === 0) {
+        console.log(`📸 [CAMERA] Captured photo #${sendCount}:`, photo.path);
+      }
+
+      // Read the file as base64 using react-native-fs (fetch doesn't work with file:// on Android)
+      const base64Image = await RNFS.readFile(photo.path, 'base64');
+      const base64data = `data:image/jpeg;base64,${base64Image}`;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        if (sendCount % 5 === 0) {
+          console.log(
+            `📤 [WS] Sending frame #${sendCount}, size: ${(
+              base64data.length / 1024
+            ).toFixed(1)}KB`,
+          );
+        }
+        wsRef.current.send(base64data);
+      } else {
+        console.log('⚠️ [WS] Cannot send - connection not open');
+      }
+
+      // Clean up the temp file to save memory
+      try {
+        await RNFS.unlink(photo.path);
+      } catch {
+        // Ignore cleanup errors
+      }
+    } catch (error) {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🚨 [CAMERA] Error capturing frame!');
+      console.log('❌ [CAMERA] Error:', error);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    }
+  }, []);
+
+  // Start frame streaming
+  const startFrameStreaming = useCallback(() => {
+    console.log('▶️ [STREAM] Starting frame streaming...');
+    console.log('⏱️ [STREAM] Interval:', FRAME_INTERVAL, 'ms');
+
+    if (frameIntervalRef.current) {
+      console.log('🔄 [STREAM] Clearing existing interval');
+      clearInterval(frameIntervalRef.current);
+    }
+
+    frameIntervalRef.current = setInterval(() => {
+      captureAndSendFrame();
+    }, FRAME_INTERVAL);
+
+    console.log('✅ [STREAM] Frame streaming started');
+  }, [captureAndSendFrame]);
+
+  // Stop frame streaming
+  const stopFrameStreaming = useCallback(() => {
+    console.log('⏹️ [STREAM] Stopping frame streaming...');
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+      console.log('✅ [STREAM] Frame streaming stopped');
+    } else {
+      console.log('ℹ️ [STREAM] No active streaming to stop');
+    }
+  }, []);
+
+  // Start scanning
+  const startScanning = useCallback(() => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚀 [APP] STARTING FACE SCAN');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
     setIsScanning(true);
     setStatus('scanning');
-    setStatusMessage('Detecting face...');
+    setStatusMessage('Connecting...');
+    setAnnotatedImage(null);
+    setMatchedUser(null);
+    setMatchScore(null);
 
-    // Simulate face detection process
+    console.log('🔌 [APP] Initiating WebSocket connection...');
+    connectWebSocket();
+
+    // Start streaming frames after a short delay
+    console.log('⏳ [APP] Waiting 500ms before starting frame stream...');
     setTimeout(() => {
-      setStatusMessage('Analyzing features...');
-    }, 1500);
+      console.log('📹 [APP] Starting frame capture & stream...');
+      startFrameStreaming();
+    }, 500);
+  }, [connectWebSocket, startFrameStreaming]);
 
+  // Stop scanning
+  const stopScanning = useCallback(() => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🛑 [APP] STOPPING FACE SCAN');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    setIsScanning(false);
+    stopFrameStreaming();
+    disconnectWebSocket();
+    setAnnotatedImage(null);
+
+    // Reset status after a delay
     setTimeout(() => {
-      setStatusMessage('Verifying identity...');
-    }, 3000);
+      setStatus('idle');
+      setStatusMessage('Ready to scan');
+      setMatchedUser(null);
+      setMatchScore(null);
+      console.log('✨ [APP] Scan stopped, ready for next');
+    }, 500);
+  }, [stopFrameStreaming, disconnectWebSocket]);
 
-    setTimeout(() => {
-      setIsScanning(false);
-      setStatus('success');
-      setStatusMessage('Attendance marked successfully!');
+  // Handle mark attendance button
+  const handleMarkAttendance = () => {
+    console.log('👆 [BUTTON] Mark Attendance pressed');
+    console.log('📊 [BUTTON] Current state - isScanning:', isScanning);
 
-      // Reset after success
-      setTimeout(() => {
-        setStatus('idle');
-        setStatusMessage('Ready to scan');
-      }, 3000);
-    }, 4500);
+    if (isScanning) {
+      console.log('🔄 [BUTTON] Action: Stopping scan');
+      stopScanning();
+    } else {
+      console.log('🔄 [BUTTON] Action: Starting scan');
+      startScanning();
+    }
   };
 
   const handlePressIn = () => {
@@ -323,6 +691,58 @@ function AppContent() {
     }).start();
   };
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopFrameStreaming();
+      disconnectWebSocket();
+    };
+  }, [stopFrameStreaming, disconnectWebSocket]);
+
+  // Request camera permission
+  const handleRequestPermission = async () => {
+    const result = await requestPermission();
+    if (!result) {
+      Alert.alert(
+        'Permission Denied',
+        'Camera permission is required for face recognition.',
+      );
+    }
+  };
+
+  // Show permission screen if no permission
+  if (!hasPermission) {
+    return (
+      <Animated.View
+        style={[
+          styles.container,
+          {
+            paddingTop: insets.top,
+            paddingBottom: insets.bottom,
+            opacity: fadeAnim,
+          },
+        ]}
+      >
+        <View style={styles.header}>
+          <Text style={styles.title}>FaceAttend</Text>
+          <Text style={styles.subtitle}>Biometric Attendance System</Text>
+        </View>
+        <PermissionScreen onRequestPermission={handleRequestPermission} />
+      </Animated.View>
+    );
+  }
+
+  // Show error if no camera device
+  if (!device) {
+    return (
+      <View style={[styles.container, styles.centerContent]}>
+        <Text style={styles.errorText}>No front camera found</Text>
+      </View>
+    );
+  }
+
+  const frameSize = width * 0.85;
+
   return (
     <Animated.View
       style={[
@@ -334,25 +754,66 @@ function AppContent() {
         },
       ]}
     >
-      {/* Background Gradient Effect */}
+      {/* Background */}
       <View style={styles.backgroundGradient} />
-      <View style={styles.backgroundGlow} />
 
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>FaceAttend</Text>
-        <Text style={styles.subtitle}>Biometric Attendance System</Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.subtitle}>Biometric Attendance System</Text>
+          <View
+            style={[
+              styles.connectionDot,
+              { backgroundColor: wsConnected ? '#00FF88' : '#666666' },
+            ]}
+          />
+        </View>
       </View>
 
       {/* Main Content */}
       <View style={styles.content}>
-        {/* Face Detection Frame */}
-        <View style={styles.frameContainer}>
-          <FaceFrame isScanning={isScanning} />
+        {/* Camera / Face Detection Frame */}
+        <View
+          style={[
+            styles.cameraContainer,
+            { width: frameSize, height: frameSize },
+          ]}
+        >
+          {/* Live Camera Preview */}
+          <Camera
+            ref={cameraRef}
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={true}
+            photo={true}
+          />
+
+          {/* Annotated Image Overlay (from WebSocket) */}
+          {annotatedImage && isScanning && (
+            <Image
+              source={{ uri: annotatedImage }}
+              style={styles.annotatedImage}
+              resizeMode="cover"
+            />
+          )}
+
+          {/* Grid Overlay */}
+          <FaceFrameOverlay
+            isScanning={isScanning}
+            pulseAnim={pulseAnim}
+            gridOpacity={gridOpacity}
+            scanLineAnim={scanLineAnim}
+          />
         </View>
 
         {/* Status */}
-        <StatusIndicator status={status} message={statusMessage} />
+        <StatusIndicator
+          status={status}
+          message={statusMessage}
+          userName={matchedUser || undefined}
+          score={matchScore || undefined}
+        />
 
         {/* Time Display */}
         <View style={styles.timeContainer}>
@@ -388,11 +849,16 @@ function AppContent() {
                   />
                 </View>
               )}
-              <Text style={styles.buttonText}>
+              <Text
+                style={[
+                  styles.buttonText,
+                  isScanning && styles.buttonTextScanning,
+                ]}
+              >
                 {status === 'success'
                   ? 'Marked!'
                   : isScanning
-                  ? 'Cancel'
+                  ? 'Stop Scanning'
                   : 'Mark Attendance'}
               </Text>
             </View>
@@ -401,7 +867,9 @@ function AppContent() {
 
         {/* Info Text */}
         <Text style={styles.infoText}>
-          Position your face within the frame for accurate detection
+          {isScanning
+            ? 'Position your face within the frame'
+            : 'Tap the button to start face recognition'}
         </Text>
       </View>
     </Animated.View>
@@ -450,62 +918,70 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0A0A0F',
   },
+  centerContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   backgroundGradient: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    height: height * 0.5,
+    bottom: 0,
     backgroundColor: '#0A0A0F',
-    opacity: 0.9,
-  },
-  backgroundGlow: {
-    position: 'absolute',
-    top: height * 0.15,
-    left: width * 0.1,
-    width: width * 0.8,
-    height: width * 0.8,
-    borderRadius: width * 0.4,
-    backgroundColor: '#00FF88',
-    opacity: 0.03,
   },
   header: {
     paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 10,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
   },
   title: {
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: '700',
     color: '#FFFFFF',
     letterSpacing: 1,
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#00FF88',
-    marginTop: 4,
     letterSpacing: 2,
     textTransform: 'uppercase',
     opacity: 0.8,
+  },
+  connectionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginLeft: 10,
   },
   content: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: 16,
   },
-  frameContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 30,
-  },
-  faceFrame: {
-    borderWidth: 1,
-    borderColor: 'rgba(0, 255, 136, 0.2)',
+  cameraContainer: {
     borderRadius: 20,
-    position: 'relative',
     overflow: 'hidden',
-    backgroundColor: 'rgba(0, 255, 136, 0.02)',
+    backgroundColor: '#1A1A1F',
+    marginBottom: 20,
+  },
+  annotatedImage: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  faceFrameOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
   },
   gridContainer: {
     position: 'absolute',
@@ -530,24 +1006,24 @@ const styles = StyleSheet.create({
   },
   corner: {
     position: 'absolute',
-    width: 40,
-    height: 40,
+    width: 50,
+    height: 50,
   },
   topLeft: {
-    top: -2,
-    left: -2,
+    top: 0,
+    left: 0,
   },
   topRight: {
-    top: -2,
-    right: -2,
+    top: 0,
+    right: 0,
   },
   bottomLeft: {
-    bottom: -2,
-    left: -2,
+    bottom: 0,
+    left: 0,
   },
   bottomRight: {
-    bottom: -2,
-    right: -2,
+    bottom: 0,
+    right: 0,
   },
   cornerLine: {
     position: 'absolute',
@@ -557,116 +1033,76 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 3,
+    height: 4,
     borderRadius: 2,
   },
   cornerBottom: {
     bottom: 0,
     left: 0,
     right: 0,
-    height: 3,
+    height: 4,
     borderRadius: 2,
   },
   cornerLeft: {
     top: 0,
     left: 0,
     bottom: 0,
-    width: 3,
+    width: 4,
     borderRadius: 2,
   },
   cornerRight: {
     top: 0,
     right: 0,
     bottom: 0,
-    width: 3,
+    width: 4,
     borderRadius: 2,
   },
   scanLine: {
     position: 'absolute',
     left: 0,
     right: 0,
-    height: 2,
+    height: 3,
     backgroundColor: '#00FF88',
     shadowColor: '#00FF88',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 1,
-    shadowRadius: 10,
+    shadowRadius: 15,
     elevation: 5,
-  },
-  faceSilhouette: {
-    position: 'absolute',
-    top: '15%',
-    left: '20%',
-    right: '20%',
-    bottom: '15%',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  faceOval: {
-    width: '85%',
-    height: '100%',
-    borderWidth: 2,
-    borderColor: 'rgba(0, 255, 136, 0.3)',
-    borderRadius: 999,
-    position: 'absolute',
-  },
-  eyesContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '50%',
-    position: 'absolute',
-    top: '30%',
-  },
-  eye: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: 'rgba(0, 255, 136, 0.4)',
-  },
-  nose: {
-    width: 8,
-    height: 20,
-    borderWidth: 2,
-    borderColor: 'rgba(0, 255, 136, 0.3)',
-    borderRadius: 4,
-    position: 'absolute',
-    top: '45%',
-  },
-  mouth: {
-    width: 30,
-    height: 8,
-    borderWidth: 2,
-    borderColor: 'rgba(0, 255, 136, 0.3)',
-    borderRadius: 10,
-    position: 'absolute',
-    top: '70%',
   },
   statusContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
     paddingHorizontal: 20,
     paddingVertical: 12,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
     borderRadius: 30,
+    minWidth: 200,
   },
   statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
     marginRight: 12,
+  },
+  statusTextContainer: {
+    flex: 1,
   },
   statusText: {
     fontSize: 14,
     fontWeight: '600',
     letterSpacing: 0.5,
   },
+  userNameText: {
+    fontSize: 12,
+    color: '#888888',
+    marginTop: 2,
+  },
   timeContainer: {
     alignItems: 'center',
   },
   timeLabel: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#666666',
     textTransform: 'uppercase',
     letterSpacing: 2,
@@ -676,39 +1112,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   time: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '300',
     color: '#FFFFFF',
     letterSpacing: 2,
   },
   date: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#888888',
-    marginTop: 4,
+    marginTop: 2,
   },
   footer: {
     paddingHorizontal: 24,
-    paddingBottom: 30,
+    paddingBottom: 24,
     alignItems: 'center',
   },
   actionButton: {
     backgroundColor: '#00FF88',
     paddingVertical: 18,
-    paddingHorizontal: 50,
+    paddingHorizontal: 40,
     borderRadius: 60,
     shadowColor: '#00FF88',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
     shadowRadius: 15,
     elevation: 8,
-    minWidth: 250,
+    minWidth: 220,
   },
   actionButtonScanning: {
-    backgroundColor: '#333333',
-    shadowColor: '#333333',
+    backgroundColor: '#FF6B6B',
+    shadowColor: '#FF6B6B',
   },
   actionButtonSuccess: {
     backgroundColor: '#00FF88',
+    shadowColor: '#00FF88',
   },
   buttonInner: {
     flexDirection: 'row',
@@ -729,10 +1166,13 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
   },
   buttonText: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
     color: '#0A0A0F',
     letterSpacing: 0.5,
+  },
+  buttonTextScanning: {
+    color: '#FFFFFF',
   },
   checkmark: {
     fontSize: 24,
@@ -743,10 +1183,59 @@ const styles = StyleSheet.create({
   infoText: {
     fontSize: 12,
     color: '#666666',
-    marginTop: 20,
+    marginTop: 16,
     textAlign: 'center',
     maxWidth: 280,
     lineHeight: 18,
+  },
+  errorText: {
+    fontSize: 16,
+    color: '#FF6B6B',
+    textAlign: 'center',
+  },
+  // Permission Screen Styles
+  permissionContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+  },
+  permissionIcon: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+  },
+  permissionIconText: {
+    fontSize: 48,
+  },
+  permissionTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  permissionSubtitle: {
+    fontSize: 14,
+    color: '#888888',
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 32,
+  },
+  permissionButton: {
+    backgroundColor: '#00FF88',
+    paddingVertical: 16,
+    paddingHorizontal: 40,
+    borderRadius: 30,
+  },
+  permissionButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0A0A0F',
   },
 });
 
