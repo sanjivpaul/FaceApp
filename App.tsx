@@ -30,7 +30,8 @@ import RNFS from 'react-native-fs';
 import ImageResizer from '@bam.tech/react-native-image-resizer';
 
 const { width, height } = Dimensions.get('window');
-const WEBSOCKET_URL = 'ws://62.84.186.207/api/v1/ws/attendance';
+// const WEBSOCKET_URL = 'ws://62.84.186.207/api/v1/ws/attendance';
+const WEBSOCKET_URL = 'wss://braincraft.in/api/v1/ws/attendance';
 const FRAME_INTERVAL = 250; // Send frame every 250ms (optimized)
 const RECONNECT_INTERVAL = 3000; // Reconnect every 3 seconds if disconnected
 const IMAGE_QUALITY = 0.5; // JPEG quality 0-1 (lower = smaller file)
@@ -372,6 +373,8 @@ function AppContent() {
     ws.onmessage = event => {
       try {
         const data = JSON.parse(event.data);
+
+        console.log('data===>', data);
 
         if (data.status === 'frame' && data.image) {
           // Only update UI if we're actively scanning
