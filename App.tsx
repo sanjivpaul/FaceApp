@@ -16,6 +16,7 @@ import {
   Image,
   Alert,
   Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import {
   SafeAreaProvider,
@@ -28,13 +29,25 @@ import {
 } from 'react-native-vision-camera';
 import RNFS from 'react-native-fs';
 import ImageResizer from '@bam.tech/react-native-image-resizer';
+import Geolocation from 'react-native-geolocation-service';
 
 const { width, height } = Dimensions.get('window');
 // const WEBSOCKET_URL = 'ws://62.84.186.207/api/v1/ws/attendance';
 const WEBSOCKET_URL = 'wss://braincraft.in/api/v1/ws/attendance';
+const USERS_API_URL = 'https://braincraft.in/api/v1/users/users';
 const FRAME_INTERVAL = 250; // Send frame every 250ms (optimized)
 const RECONNECT_INTERVAL = 3000; // Reconnect every 3 seconds if disconnected
 const IMAGE_QUALITY = 0.5; // JPEG quality 0-1 (lower = smaller file)
+
+// User type for API response
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  userImage: string | null;
+  employeeId: string | null;
+  fullName: string | null;
+}
 
 // Face Frame Component with Grid Overlay
 const FaceFrameOverlay = ({
@@ -150,11 +163,15 @@ const StatusIndicator = ({
   message,
   userName,
   score,
+  userImage,
+  employeeId,
 }: {
   status: 'idle' | 'scanning' | 'success' | 'error' | 'no_face';
   message: string;
   userName?: string;
   score?: number;
+  userImage?: string | null;
+  employeeId?: string | null;
 }) => {
   const dotAnim = useRef(new Animated.Value(0)).current;
 
@@ -195,23 +212,35 @@ const StatusIndicator = ({
 
   return (
     <View style={styles.statusContainer}>
-      <Animated.View
-        style={[
-          styles.statusDot,
-          {
-            backgroundColor: getStatusColor(),
-            opacity: status === 'scanning' ? dotAnim : 1,
-          },
-        ]}
-      />
+      {status === 'success' && userImage ? (
+        <Image source={{ uri: userImage }} style={styles.userAvatar} />
+      ) : (
+        <Animated.View
+          style={[
+            styles.statusDot,
+            {
+              backgroundColor: getStatusColor(),
+              opacity: status === 'scanning' ? dotAnim : 1,
+            },
+          ]}
+        />
+      )}
       <View style={styles.statusTextContainer}>
         <Text style={[styles.statusText, { color: getStatusColor() }]}>
           {message}
         </Text>
-        {userName && (
-          <Text style={styles.userNameText}>
-            Welcome, {userName} {score ? `(${(score * 100).toFixed(1)}%)` : ''}
-          </Text>
+        {userName && status === 'success' && (
+          <View>
+            <Text style={styles.userNameText}>{userName}</Text>
+            {employeeId && (
+              <Text style={styles.employeeIdText}>ID: {employeeId}</Text>
+            )}
+            {score && (
+              <Text style={styles.scoreText}>
+                Confidence: {(score * 100).toFixed(1)}%
+              </Text>
+            )}
+          </View>
         )}
       </View>
     </View>
@@ -275,12 +304,47 @@ function AppContent() {
   const [matchedUser, setMatchedUser] = useState<string | null>(null);
   const [matchScore, setMatchScore] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [users, setUsers] = useState<User[]>([]);
+  const usersRef = useRef<User[]>([]); // Ref to always have current users
+  const [usersLoaded, setUsersLoaded] = useState(false); // true after users API finishes (then we connect WS)
+  const [matchedUserDetails, setMatchedUserDetails] = useState<User | null>(
+    null,
+  );
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const buttonScale = useRef(new Animated.Value(1)).current;
   const scanLineAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const gridOpacity = useRef(new Animated.Value(0.3)).current;
+
+  const requestLocationPermission = async () => {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    }
+    return true;
+  };
+
+  const getCurrentLocation = () => {
+    return new Promise((resolve, reject) => {
+      Geolocation.getCurrentPosition(
+        position => {
+          resolve({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+          });
+        },
+        error => reject(error),
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 10000,
+        },
+      );
+    });
+  };
 
   // Initialize fade animation
   useEffect(() => {
@@ -290,6 +354,91 @@ function AppContent() {
       useNativeDriver: true,
     }).start();
   }, [fadeAnim]);
+
+  // Fetch users on app load (must complete before match so we can show names)
+  useEffect(() => {
+    const fetchUsers = async () => {
+      try {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('👥 FETCHING USERS FROM API...');
+        console.log('📡 URL:', USERS_API_URL);
+        const response = await fetch(USERS_API_URL);
+        const data = await response.json();
+        console.log(
+          '📥 API Response success:',
+          data.success,
+          '| records count:',
+          data.records?.length,
+        );
+
+        if (data.success && data.records && Array.isArray(data.records)) {
+          setUsers(data.records);
+          usersRef.current = data.records; // Store in ref for immediate access on match
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log(
+            `✅ LOADED ${data.records.length} USERS (cache ready for name lookup):`,
+          );
+          data.records.forEach((u: User) => {
+            console.log(
+              `   ID: ${u.id} | Name: ${u.name} | FullName: ${
+                u.fullName ?? 'n/a'
+              } | EmpID: ${u.employeeId ?? 'n/a'}`,
+            );
+          });
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        } else {
+          console.log('❌ API returned success=false or no records');
+        }
+        setUsersLoaded(true); // Allow WebSocket to connect (with or without users)
+      } catch (error) {
+        console.error('❌ Failed to fetch users:', error);
+        setUsersLoaded(true);
+      }
+    };
+
+    fetchUsers();
+  }, []);
+
+  // Keep ref in sync with users state (so WS callback always has latest)
+  useEffect(() => {
+    usersRef.current = users;
+    if (users.length > 0) {
+      console.log('📌 [CACHE] usersRef synced, count:', users.length);
+    }
+  }, [users]);
+
+  // Helper function to find user by ID - uses ref to avoid stale closure
+  const findUserById = useCallback(
+    (userId: number | string): User | null => {
+      const id = typeof userId === 'string' ? parseInt(userId, 10) : userId;
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🔍 FINDING USER BY ID:', id);
+      console.log('📊 Users in ref:', usersRef.current.length);
+      console.log('📊 Users in state:', users.length);
+
+      const foundUser = usersRef.current.find(user => user.id === id);
+
+      if (foundUser) {
+        console.log('✅ USER FOUND:');
+        console.log('   ID:', foundUser.id);
+        console.log('   Name:', foundUser.name);
+        console.log('   FullName:', foundUser.fullName);
+        console.log('   Email:', foundUser.email);
+        console.log('   EmployeeID:', foundUser.employeeId);
+        console.log('   Image:', foundUser.userImage ? 'Yes' : 'No');
+      } else {
+        console.log('❌ USER NOT FOUND for ID:', id);
+        console.log(
+          '📋 Available user IDs:',
+          usersRef.current.map(u => u.id).join(', '),
+        );
+      }
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      return foundUser || null;
+    },
+    [users],
+  );
 
   // Scanning animations
   useEffect(() => {
@@ -384,9 +533,55 @@ function AppContent() {
             setStatusMessage('Scanning face...');
           }
         } else if (data.status === 'matched') {
+          // Find user details from users cache (ref synced from state)
+          const rawUserId = data.userId;
+          const matchedUserId =
+            typeof rawUserId === 'string'
+              ? parseInt(rawUserId, 10)
+              : Number(rawUserId);
+          const cachedUsers = usersRef.current || [];
+
+          // Match by number or string (API may return id as number or string)
+          const userDetails =
+            cachedUsers.find(
+              u =>
+                u.id === matchedUserId ||
+                u.id === rawUserId ||
+                Number(u.id) === matchedUserId,
+            ) || null;
+
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
           console.log('✅ FACE MATCHED!');
-          console.log('👤 User:', data.userId, '| Score:', data.score);
+          console.log(
+            '👤 User ID from server:',
+            rawUserId,
+            '(type:',
+            typeof rawUserId + ')',
+          );
+          console.log('👤 Parsed User ID:', matchedUserId);
+          console.log('📊 Total users in cache:', cachedUsers.length);
+          if (cachedUsers.length > 0) {
+            console.log(
+              '📋 Cached:',
+              cachedUsers.map(u => `id=${u.id} name=${u.name}`).join(', '),
+            );
+          } else {
+            console.log('⚠️ CACHE EMPTY – will show "User', rawUserId + '"');
+          }
+
+          if (userDetails) {
+            console.log('✅ USER FOUND – will show name:', userDetails.name);
+            console.log(
+              '   FullName:',
+              userDetails.fullName,
+              '| Email:',
+              userDetails.email,
+            );
+          } else {
+            console.log('❌ USER NOT FOUND – will show "User', rawUserId + '"');
+          }
+
+          console.log('📊 Score:', data.score);
           console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
           // IMMEDIATELY stop sending frames
@@ -396,10 +591,18 @@ function AppContent() {
             frameIntervalRef.current = null;
           }
 
+          // Display name from cache, or fallback to "User {id}"
+          const displayName =
+            (userDetails && (userDetails.fullName || userDetails.name)) ||
+            `User ${rawUserId}`;
+
+          console.log('🖥️ DISPLAY NAME ON UI:', displayName);
+
           setStatus('success');
-          setStatusMessage(data.message || 'Attendance Marked!');
-          setMatchedUser(data.userId?.toString() || 'User');
+          setStatusMessage('Attendance Marked!');
+          setMatchedUser(displayName);
           setMatchScore(data.score);
+          setMatchedUserDetails(userDetails);
 
           // Reset UI and deactivate camera after showing success
           setTimeout(() => {
@@ -412,10 +615,16 @@ function AppContent() {
               setStatusMessage('Ready to scan');
               setMatchedUser(null);
               setMatchScore(null);
+              setMatchedUserDetails(null);
             }, 2000);
           }, 2500);
         } else if (data.status === 'unmatched') {
-          console.log('❌ Face not recognized');
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('❌ FACE NOT MATCHED!');
+          console.log('📦 Full Response:', JSON.stringify(data, null, 2));
+          console.log('💬 Message:', data.message);
+          console.log('🔑 All Keys:', Object.keys(data));
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
           isSendingRef.current = false;
           if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
@@ -490,12 +699,16 @@ function AppContent() {
     wsRef.current = ws;
   }, []);
 
-  // Auto-connect WebSocket on app start and auto-reconnect
+  // Connect WebSocket only AFTER users are loaded (so match handler can resolve names)
   useEffect(() => {
-    console.log('🚀 [APP] Starting - Pre-connecting WebSocket...');
+    if (!usersLoaded) return;
+    console.log('🚀 [APP] Users loaded – connecting WebSocket...');
     connectWebSocket();
+  }, [usersLoaded, connectWebSocket]);
 
-    // Setup auto-reconnect
+  // Auto-reconnect WebSocket when closed
+  useEffect(() => {
+    if (!usersLoaded) return;
     reconnectIntervalRef.current = setInterval(() => {
       if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
         console.log('🔄 [WS] Auto-reconnecting...');
@@ -511,7 +724,7 @@ function AppContent() {
         wsRef.current.close();
       }
     };
-  }, [connectWebSocket]);
+  }, [usersLoaded, connectWebSocket]);
 
   // Stop sending but keep connection
   const stopSending = useCallback(() => {
@@ -640,8 +853,19 @@ function AppContent() {
   }, []);
 
   // Start scanning - Activate camera first, then stream
-  const startScanning = useCallback(() => {
+  const startScanning = useCallback(async () => {
     console.log('🚀 STARTING SCAN');
+
+    const hasLocation = await requestLocationPermission();
+
+    if (!hasLocation) {
+      Alert.alert('Permission required', 'Location permission is required');
+      return;
+    }
+
+    const location = await getCurrentLocation();
+
+    console.log('📍 Location:', location);
 
     // Check if WebSocket is connected
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -883,6 +1107,8 @@ function AppContent() {
           message={statusMessage}
           userName={matchedUser || undefined}
           score={matchScore || undefined}
+          userImage={matchedUserDetails?.userImage}
+          employeeId={matchedUserDetails?.employeeId}
         />
 
         {/* Time Display */}
@@ -1254,9 +1480,28 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   userNameText: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    marginTop: 4,
+    fontWeight: '700',
+  },
+  employeeIdText: {
     fontSize: 12,
     color: '#888888',
     marginTop: 2,
+  },
+  scoreText: {
+    fontSize: 11,
+    color: '#00FF88',
+    marginTop: 2,
+  },
+  userAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 2,
+    borderColor: '#00FF88',
+    marginRight: 12,
   },
   timeContainer: {
     alignItems: 'center',

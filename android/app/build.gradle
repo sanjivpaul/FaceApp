@@ -2,6 +2,23 @@ apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
+// Gradle's PATH often omits Homebrew/nvm; codegen defaults to `node` and fails. Prefer a real path.
+def resolveNodeExecutable = {
+    def candidates = []
+    [project.findProperty("NODE_BINARY"), System.getenv("NODE_BINARY"),
+     "/opt/homebrew/bin/node", "/usr/local/bin/node"].each { p ->
+        if (p != null && !candidates.contains(p.toString())) {
+            candidates.add(p.toString())
+        }
+    }
+    for (path in candidates) {
+        if (new File(path).exists()) {
+            return path
+        }
+    }
+    return "node"
+}()
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
@@ -24,8 +41,7 @@ react {
     // debuggableVariants = ["liteDebug", "prodDebug"]
 
     /* Bundling */
-    //   A list containing the node command and its flags. Default is just 'node'.
-    // nodeExecutableAndArgs = ["node"]
+    nodeExecutableAndArgs = [resolveNodeExecutable]
     //
     //   The command to run when bundling. By default is 'bundle'
     // bundleCommand = "ram-bundle"
